@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en" translate="no">
+<head>
+<meta charset="utf-8">
+<meta name="google" content="notranslate">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Jarvis</title>
+<style>
+  :root { --bg:#0b1624; --panel:#112238; --line:#1e3a5c; --text:#e6f1ff; --dim:#8aa4c4; --glow:#35d0ff; --me:#1a3a5e; }
+  * { box-sizing:border-box; }
+  html,body { height:100%; margin:0; }
+  body { background:var(--bg); color:var(--text); font-family:system-ui,sans-serif; display:flex; flex-direction:column; max-width:640px; margin:0 auto; }
+  header { display:flex; gap:8px; padding:12px; border-bottom:1px solid var(--line); }
+  header input,header select { background:var(--panel); border:1px solid var(--line); color:var(--text); border-radius:8px; padding:10px; font-size:14px; min-width:0; }
+  #key { flex:1; }
+  #log { flex:1; overflow-y:auto; padding:16px; display:flex; flex-direction:column; gap:10px; }
+  .msg { padding:10px 14px; border-radius:14px; max-width:85%; line-height:1.45; white-space:pre-wrap; }
+  .me { background:var(--me); align-self:flex-end; }
+  .ai { background:var(--panel); border:1px solid var(--line); align-self:flex-start; }
+  .sys { color:var(--dim); font-size:13px; align-self:center; text-align:center; }
+  footer { padding:12px; border-top:1px solid var(--line); display:flex; gap:10px; align-items:center; }
+  #text { flex:1; background:var(--panel); border:1px solid var(--line); color:var(--text); border-radius:22px; padding:12px 16px; font-size:16px; min-width:0; }
+  button { border:0; cursor:pointer; color:var(--text); }
+  #send { background:var(--panel); border:1px solid var(--line); border-radius:22px; padding:12px 16px; }
+  #mic { width:64px; height:64px; border-radius:50%; background:radial-gradient(circle at 50% 40%, #1b6a8f, #0e3552); box-shadow:0 0 0 2px var(--glow); font-size:26px; flex:none; }
+  #mic.on { animation:pulse 1.2s infinite; background:radial-gradient(circle at 50% 40%, #35d0ff, #1b6a8f); }
+  @keyframes pulse { 0%{box-shadow:0 0 0 2px var(--glow),0 0 0 2px rgba(53,208,255,.5)} 100%{box-shadow:0 0 0 2px var(--glow),0 0 0 22px rgba(53,208,255,0)} }
+  @media (prefers-reduced-motion:reduce){ #mic.on{animation:none} }
+  button:focus-visible,input:focus-visible,select:focus-visible { outline:2px solid var(--glow); outline-offset:2px; }
+</style>
+</head>
+<body>
+<header>
+  <input id="key" type="password" placeholder="Gemini API key" autocomplete="off">
+  <select id="lang">
+    <option value="bn-BD">বাংলা</option>
+    <option value="en-US">English</option>
+    <option value="hi-IN">हिन्दी</option>
+  </select>
+</header>
+<div id="log"><div class="msg sys">API key boshao, tarpor mic tap kore kotha bolo.</div></div>
+<footer>
+  <input id="text" placeholder="Ba ekhane type koro" enterkeyhint="send">
+  <button id="send">Pathao</button>
+  <button id="mic" aria-label="Kotha bolo">🎙</button>
+</footer>
+
+<script>
+const MODELS = ["gemini-flash-latest", "gemini-2.5-flash"]; // prothom ta kaj na korle dwitiyo ta try hobe
+const SYSTEM = "You are Jarvis, a helpful personal voice assistant. Reply in the same language the user speaks. Keep answers short (1-3 sentences) because they are read aloud. No markdown.";
+
+const $ = id => document.getElementById(id);
+const log = $("log"), keyEl = $("key"), langEl = $("lang"), micEl = $("mic");
+const history = [];
+
+try { keyEl.value = localStorage.getItem("gkey") || ""; langEl.value = localStorage.getItem("glang") || "bn-BD"; } catch(e) {}
+keyEl.addEventListener("change", () => { try { localStorage.setItem("gkey", keyEl.value.trim()); } catch(e) {} });
+langEl.addEventListener("change", () => { try { localStorage.setItem("glang", langEl.value); } catch(e) {} });
+
+function add(cls, text) {
+  const d = document.createElement("div");
+  d.className = "msg " + cls; d.textContent = text;
+  log.appendChild(d); log.scrollTop = log.scrollHeight;
+  return d;
+}
+
+function speak(text) {
+  if (!("speechSynthesis" in window)) return;
+  speechSynthesis.cancel();
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = langEl.value;
+  speechSynthesis.speak(u);
+}
+
+async function callGemini(model, key, body) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 25000);
+  try {
+    const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST", signal: ctl.signal,
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify(body)
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { const e = new Error(`[${model}] HTTP ${r.status}: ${data.error?.message || ""}`); e.status = r.status; throw e; }
+    return data;
+  } catch (e) {
+    if (e.name === "AbortError") throw new Error(`[${model}] 25 second-e uttor ashe ni (timeout)`);
+    throw e;
+  } finally { clearTimeout(t); }
+}
+
+async function ask(q) {
+  const key = keyEl.value.trim();
+  if (!key) { add("sys", "Age API key boshao."); return; }
+  add("me", q);
+  history.push({ role: "user", parts: [{ text: q }] });
+  const wait = add("sys", "...");
+  const body = { system_instruction: { parts: [{ text: SYSTEM }] }, contents: history.slice(-20) };
+  try {
+    let data;
+    try { data = await callGemini(MODELS[0], key, body); }
+    catch (e) { if (e.status === 404 || e.status === 400) data = await callGemini(MODELS[1], key, body); else throw e; }
+    const a = data.candidates?.[0]?.content?.parts?.map(p => p.text || "").join("") || "(kono uttor pai ni)";
+    history.push({ role: "model", parts: [{ text: a }] });
+    wait.remove(); add("ai", a); speak(a);
+  } catch (e) {
+    history.pop(); wait.remove(); add("sys", "Error: " + e.message);
+  }
+}
+
+// Text input
+function sendText() { const v = $("text").value.trim(); if (v) { $("text").value = ""; ask(v); } }
+$("send").addEventListener("click", sendText);
+$("text").addEventListener("keydown", e => { if (e.key === "Enter") sendText(); });
+
+// Voice input
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec = null, listening = false;
+micEl.addEventListener("click", () => {
+  if (!SR) { add("sys", "Ei browser-e voice input nai. Chrome use koro, ba type koro."); return; }
+  if (listening) { rec.stop(); return; }
+  speechSynthesis.cancel();
+  rec = new SR();
+  rec.lang = langEl.value; rec.interimResults = false; rec.maxAlternatives = 1;
+  rec.onstart = () => { listening = true; micEl.classList.add("on"); };
+  rec.onend = () => { listening = false; micEl.classList.remove("on"); };
+  rec.onerror = e => add("sys", "Mic error: " + e.error + (e.error === "not-allowed" ? " (mic permission dao, ar https page-e kholo)" : ""));
+  rec.onresult = e => ask(e.results[0][0].transcript);
+  rec.start();
+});
+</script>
+</body>
+</html>
